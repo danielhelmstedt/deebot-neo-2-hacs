@@ -1,20 +1,37 @@
 """DEEBOT NEO 2 / NEO 2 PLUS q287s6 capability profile."""
 
-from __future__ import annotations
-
 from dataclasses import replace
 
-from deebot_client.capabilities import CapabilityEvent, CapabilityExecute, CapabilitySetTypes
-from deebot_client.commands.json.clean import CleanArea
-from deebot_client.events import BatteryEvent, FanSpeedEvent, FanSpeedLevel, StateEvent
+from deebot_client.capabilities import (
+    CapabilityEvent,
+    CapabilityExecute,
+    CapabilityMap,
+    CapabilitySetTypes,
+)
+from deebot_client.events import (
+    BatteryEvent,
+    FanSpeedEvent,
+    FanSpeedLevel,
+    RoomsEvent,
+    StateEvent,
+)
+from deebot_client.events.map import (
+    CachedMapInfoEvent,
+    MapChangedEvent,
+    MapTraceEvent,
+    PositionsEvent,
+)
 from deebot_client.hardware.qhe2o2 import get_device_info as _base_get_device_info
 
 from .q287s6_app import (
+    Q287s6EndpointAreaClean,
     Q287s6EndpointCharge,
     Q287s6EndpointClean,
     Q287s6EndpointFanSpeed,
     Q287s6EndpointFanSpeedStatus,
     Q287s6EndpointStatus,
+    Q287s6MapData,
+    Q287s6MapIndex,
 )
 
 
@@ -38,7 +55,7 @@ def get_device_info():
     clean_action = replace(
         info.capabilities.clean.action,
         command=Q287s6EndpointClean,
-        area=CleanArea,
+        area=Q287s6EndpointAreaClean,
     )
     clean = replace(
         info.capabilities.clean,
@@ -66,7 +83,17 @@ def get_device_info():
             ),
         ),
         life_span=life_span,
-        map=None,
+        map=CapabilityMap(
+            cached_info=CapabilityEvent(CachedMapInfoEvent, [Q287s6MapIndex()]),
+            changed=CapabilityEvent(MapChangedEvent, []),
+            info=CapabilityExecute(Q287s6MapData),
+            major=None,
+            minor=None,
+            position=CapabilityEvent(PositionsEvent, []),
+            rooms=CapabilityEvent(RoomsEvent, [Q287s6MapIndex()]),
+            set=CapabilityExecute(Q287s6MapData),
+            trace=CapabilityEvent(MapTraceEvent, []),
+        ),
         network=network,
         play_sound=None,
         settings=replace(

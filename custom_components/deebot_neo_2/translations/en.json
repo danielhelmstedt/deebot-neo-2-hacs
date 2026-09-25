@@ -19,12 +19,27 @@
         "data": {
           "device_did": "Vacuum"
         }
+      },
+      "device_verification": {
+        "title": "Verify your Ecovacs account",
+        "description": "Enter the verification code Ecovacs sent to {username}.",
+        "data": {
+          "verification_code": "Verification code"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Reauthenticate Ecovacs",
+        "description": "Confirm the password for {username} to restore the trusted device connection.",
+        "data": {
+          "password": "Password"
+        }
       }
     },
     "error": {
       "cannot_connect": "Cannot connect to Ecovacs. Check your network, account region, and try again.",
       "invalid_auth": "Invalid Ecovacs account details.",
       "no_supported_vacuums": "No supported DEEBOT NEO 2.0 / NEO 2.0 PLUS q287s6 vacuum was found on this account.",
+      "invalid_verification_code": "The verification code is invalid or has expired.",
       "unknown": "Unexpected error. Check Home Assistant logs for details."
     },
     "abort": {

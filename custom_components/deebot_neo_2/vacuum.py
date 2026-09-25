@@ -1,24 +1,35 @@
 """Vacuum platform for DEEBOT NEO 2."""
 
-from __future__ import annotations
-
 import asyncio
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Mapping
 import logging
 from time import monotonic
 from typing import Any
 
 from deebot_client.device import Device
-from deebot_client.events import BatteryEvent, FanSpeedEvent, FanSpeedLevel, StateEvent
+from deebot_client.events import (
+    BatteryEvent,
+    FanSpeedEvent,
+    FanSpeedLevel,
+    RoomsEvent,
+    StateEvent,
+)
 from deebot_client.events.base import Event
-from deebot_client.models import CleanAction, State
+from deebot_client.map import Map
+from deebot_client.models import CleanAction, CleanMode, State
 
-from homeassistant.components.vacuum import StateVacuumEntity, VacuumActivity, VacuumEntityFeature
+from homeassistant.components.vacuum import (
+    Segment,
+    StateVacuumEntity,
+    VacuumActivity,
+    VacuumEntityFeature,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.util import slugify
 
 from . import Neo2Controller
 from .const import DOMAIN
@@ -67,9 +78,12 @@ class Neo2VacuumEntity(StateVacuumEntity):
         | VacuumEntityFeature.RETURN_HOME
         | VacuumEntityFeature.STATE
         | VacuumEntityFeature.FAN_SPEED
+        | VacuumEntityFeature.CLEAN_AREA
     )
+    _unrecorded_attributes = frozenset({"rooms"})
 
     def __init__(self, device: Device) -> None:
+        """Initialize the NEO 2 vacuum."""
         self._device = device
         self._subscribed_events: set[type[Event]] = set()
         self._attr_unique_id = f"{device.device_info['did']}_vacuum"
@@ -77,9 +91,12 @@ class Neo2VacuumEntity(StateVacuumEntity):
         self._attr_available = True
         self._attr_fan_speed_list = list(_SUCTION_LABELS.values())
         self._return_to_dock_task: asyncio.Task[None] | None = None
+        self._room_event: RoomsEvent | None = None
+        self._maps: dict[str, Map] = {}
 
     @property
     def device_info(self) -> DeviceInfo:
+        """Return device registry information."""
         info = self._device.device_info
         device_info = DeviceInfo(
             identifiers={(DOMAIN, info["did"])},
@@ -100,7 +117,9 @@ class Neo2VacuumEntity(StateVacuumEntity):
 
         async def on_state(event: StateEvent) -> None:
             self._attr_available = True
-            self._attr_activity = _STATE_TO_ACTIVITY.get(event.state, VacuumActivity.IDLE)
+            self._attr_activity = _STATE_TO_ACTIVITY.get(
+                event.state, VacuumActivity.IDLE
+            )
             if self._attr_activity != VacuumActivity.RETURNING:
                 self._cancel_return_to_dock_monitor()
             self.async_write_ha_state()
@@ -118,7 +137,36 @@ class Neo2VacuumEntity(StateVacuumEntity):
         self._subscribe(StateEvent, on_state)
         self._subscribe(FanSpeedEvent, on_fan_speed)
         self._subscribe(BatteryEvent, on_battery)
+        if map_capability := self._device.capabilities.map:
+
+            async def on_rooms(event: RoomsEvent) -> None:
+                self._room_event = event
+                self.async_write_ha_state()
+
+            async def on_map_info(event) -> None:
+                self._maps = {map_info.id: map_info for map_info in event.maps}
+
+            self._subscribe(map_capability.rooms.event, on_rooms)
+            self._subscribe(map_capability.cached_info.event, on_map_info)
         self.async_schedule_update_ha_state(force_refresh=True)
+
+    @property
+    def extra_state_attributes(self) -> Mapping[str, Any]:
+        """Return discovered room IDs."""
+        rooms: dict[str, Any] = {}
+        if self._room_event is None:
+            return {"rooms": rooms}
+        for room in self._room_event.rooms:
+            name = slugify(room.name)
+            if name in rooms:
+                rooms[name] = (
+                    [rooms[name], room.id]
+                    if not isinstance(rooms[name], list)
+                    else [*rooms[name], room.id]
+                )
+            else:
+                rooms[name] = room.id
+        return {"rooms": rooms}
 
     async def async_will_remove_from_hass(self) -> None:
         """Cancel pending q287s6 fallback work before removing the entity."""
@@ -138,20 +186,26 @@ class Neo2VacuumEntity(StateVacuumEntity):
         for event_type in self._subscribed_events:
             try:
                 self._device.events.request_refresh(event_type)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 _LOGGER.debug("q287s6 refresh failed for %s", event_type, exc_info=True)
 
     async def async_start(self) -> None:
         """Start an auto clean."""
-        await self._execute("start", self._device.capabilities.clean.action.command(CleanAction.START))
+        await self._execute(
+            "start", self._device.capabilities.clean.action.command(CleanAction.START)
+        )
 
     async def async_pause(self) -> None:
         """Pause the current clean."""
-        await self._execute("pause", self._device.capabilities.clean.action.command(CleanAction.PAUSE))
+        await self._execute(
+            "pause", self._device.capabilities.clean.action.command(CleanAction.PAUSE)
+        )
 
     async def async_return_to_base(self, **kwargs: Any) -> None:
         """Return the vacuum to the dock."""
-        await self._execute("return_to_base", self._device.capabilities.charge.execute())
+        await self._execute(
+            "return_to_base", self._device.capabilities.charge.execute()
+        )
         self._attr_activity = VacuumActivity.RETURNING
         self.async_write_ha_state()
         self._start_return_to_dock_monitor()
@@ -160,14 +214,53 @@ class Neo2VacuumEntity(StateVacuumEntity):
         """Set suction power."""
         if fan_speed not in self._attr_fan_speed_list:
             raise HomeAssistantError(f"Unsupported suction power: {fan_speed}")
-        await self._execute("set_suction_power", self._device.capabilities.fan_speed.set(fan_speed))
+        await self._execute(
+            "set_suction_power", self._device.capabilities.fan_speed.set(fan_speed)
+        )
+
+    async def async_get_segments(self) -> list[Any]:
+        """Return discovered rooms as cleanable segments."""
+        if self._room_event is None:
+            return []
+        map_info = next(
+            (
+                map_info
+                for map_info in self._maps.values()
+                if map_info.id == self._room_event.map_id
+            ),
+            None,
+        )
+        if map_info is None:
+            return []
+        return [
+            Segment(id=f"{map_info.id}_{room.id}", name=room.name, group=map_info.name)
+            for room in self._room_event.rooms
+        ]
+
+    async def async_clean_segments(self, segment_ids: list[str], **kwargs: Any) -> None:
+        """Clean the selected rooms."""
+        if self._room_event is None:
+            return
+        map_id = self._room_event.map_id
+        room_ids = [
+            int(segment_id.removeprefix(f"{map_id}_"))
+            for segment_id in segment_ids
+            if segment_id.startswith(f"{map_id}_")
+        ]
+        if room_ids:
+            await self._execute(
+                "clean_segments",
+                self._device.capabilities.clean.action.area(
+                    CleanMode.SPOT_AREA, room_ids, 1
+                ),
+            )
 
     async def _execute(self, action: str, command: Any) -> None:
         try:
             _LOGGER.debug("q287s6 command requested: %s", action)
             await self._device.execute_command(command)
             _LOGGER.debug("q287s6 command succeeded: %s", action)
-        except Exception as err:  # noqa: BLE001
+        except Exception as err:
             _LOGGER.exception("q287s6 command failed: %s", action)
             raise HomeAssistantError(f"DEEBOT NEO 2 command failed: {action}") from err
 
@@ -202,7 +295,7 @@ class Neo2VacuumEntity(StateVacuumEntity):
                     return
         except asyncio.CancelledError:
             raise
-        except Exception:  # noqa: BLE001
+        except Exception:
             _LOGGER.debug("q287s6 return-to-dock monitor failed", exc_info=True)
         finally:
             if self._return_to_dock_task is asyncio.current_task():
@@ -215,7 +308,7 @@ class Neo2VacuumEntity(StateVacuumEntity):
                 continue
             try:
                 self._device.events.request_refresh(event_type)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 _LOGGER.debug(
                     "q287s6 return-to-dock refresh failed for %s",
                     event_type,
