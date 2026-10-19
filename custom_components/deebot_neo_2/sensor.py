@@ -1,223 +1,200 @@
-"""Sensors for DEEBOT NEO 2."""
+"""Sensor module."""
 
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, override
 
-from deebot_client.device import Device
+from deebot_client.capabilities import CapabilityEvent
 from deebot_client.events import BatteryEvent
 from deebot_client.events.base import Event
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
+    SensorEntityDescription,
     SensorStateClass,
 )
-from homeassistant.const import PERCENTAGE, UnitOfArea, UnitOfTime
+from homeassistant.const import PERCENTAGE, EntityCategory, UnitOfArea, UnitOfTime
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.typing import StateType
 
-from . import Neo2Controller
-from .const import DOMAIN
-from .q287s6_app import Neo2StatusEvent
-
-
-@dataclass(frozen=True)
-class _StatusDescription:
-    key: str
-    name: str
-    unit: str | None = None
-    device_class: SensorDeviceClass | None = None
-    state_class: SensorStateClass | None = None
+from . import NgiotConfigEntry
+from .entity import NgiotCapabilityEntityDescription, NgiotDescriptionEntity
+from .ngiot.events import StatusEvent
+from .ngiot.hardware import status_capability
+from .util import get_supported_entities
 
 
-_STATUS_DESCRIPTIONS = (
-    _StatusDescription(
+@dataclass(kw_only=True, frozen=True)
+class NgiotSensorEntityDescription[EventT: Event](
+    SensorEntityDescription,
+    NgiotCapabilityEntityDescription,
+):
+    """Class describing sensor entity."""
+
+    value_fn: Callable[[EventT], StateType]
+    attributes_fn: Callable[[EventT], Mapping[str, Any] | None] | None = None
+
+
+def _status_value(key: str) -> Callable[[StatusEvent], StateType]:
+    def value(event: StatusEvent) -> StateType:
+        return event.data.get(key)
+
+    return value
+
+
+def _consumable(
+    kind: str,
+) -> tuple[
+    Callable[[StatusEvent], StateType],
+    Callable[[StatusEvent], Mapping[str, Any] | None],
+]:
+    def find(event: StatusEvent) -> dict[str, Any] | None:
+        return next(
+            (
+                item
+                for item in event.data.get("consumables", [])
+                if item.get("type") == kind and item.get("left") is not None
+            ),
+            None,
+        )
+
+    def value(event: StatusEvent) -> StateType:
+        return item["left"] if (item := find(event)) else None
+
+    def attributes(event: StatusEvent) -> Mapping[str, Any] | None:
+        return {"total": item.get("total")} if (item := find(event)) else None
+
+    return value, attributes
+
+
+def _status_description(
+    key: str,
+    *,
+    translation_key: str,
+    unit: str | None = None,
+    device_class: SensorDeviceClass | None = None,
+    state_class: SensorStateClass | None = None,
+) -> NgiotSensorEntityDescription[StatusEvent]:
+    return NgiotSensorEntityDescription[StatusEvent](
+        capability_fn=status_capability,
+        value_fn=_status_value(key),
+        key=key,
+        translation_key=translation_key,
+        native_unit_of_measurement=unit,
+        device_class=device_class,
+        state_class=state_class,
+    )
+
+
+def _consumable_description(
+    kind: str, translation_key: str
+) -> NgiotSensorEntityDescription[StatusEvent]:
+    value_fn, attributes_fn = _consumable(kind)
+    return NgiotSensorEntityDescription[StatusEvent](
+        capability_fn=status_capability,
+        value_fn=value_fn,
+        attributes_fn=attributes_fn,
+        key=f"consumable_{kind}",
+        translation_key=translation_key,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        state_class=SensorStateClass.MEASUREMENT,
+    )
+
+
+ENTITY_DESCRIPTIONS: tuple[NgiotSensorEntityDescription, ...] = (
+    NgiotSensorEntityDescription[BatteryEvent](
+        capability_fn=lambda caps: caps.battery,
+        value_fn=lambda e: e.value,
+        key="battery",
+        device_class=SensorDeviceClass.BATTERY,
+        native_unit_of_measurement=PERCENTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+    ),
+    _status_description(
         "cleanArea",
-        "Clean area",
-        UnitOfArea.SQUARE_METERS,
-        SensorDeviceClass.AREA,
-        SensorStateClass.MEASUREMENT,
+        translation_key="stats_area",
+        unit=UnitOfArea.SQUARE_METERS,
+        device_class=SensorDeviceClass.AREA,
+        state_class=SensorStateClass.MEASUREMENT,
     ),
-    _StatusDescription(
+    _status_description(
         "cleanTime",
-        "Clean time",
-        UnitOfTime.MINUTES,
-        SensorDeviceClass.DURATION,
-        SensorStateClass.MEASUREMENT,
+        translation_key="stats_time",
+        unit=UnitOfTime.MINUTES,
+        device_class=SensorDeviceClass.DURATION,
+        state_class=SensorStateClass.MEASUREMENT,
     ),
-    _StatusDescription(
-        "cleanCount", "Clean count", state_class=SensorStateClass.TOTAL_INCREASING
-    ),
-    _StatusDescription(
-        "cleanAreaTotal",
-        "Total clean area",
-        UnitOfArea.SQUARE_METERS,
-        SensorDeviceClass.AREA,
-        SensorStateClass.TOTAL_INCREASING,
-    ),
-    _StatusDescription(
-        "cleanCountTotal",
-        "Total clean count",
+    _status_description(
+        "cleanCount",
+        translation_key="stats_cleanings",
         state_class=SensorStateClass.TOTAL_INCREASING,
     ),
-    _StatusDescription(
-        "cleanTimeTotal",
-        "Total clean time",
-        UnitOfTime.MINUTES,
-        SensorDeviceClass.DURATION,
-        SensorStateClass.TOTAL_INCREASING,
+    _status_description(
+        "cleanAreaTotal",
+        translation_key="total_stats_area",
+        unit=UnitOfArea.SQUARE_METERS,
+        device_class=SensorDeviceClass.AREA,
+        state_class=SensorStateClass.TOTAL_INCREASING,
     ),
-    _StatusDescription("volume", "Volume", state_class=SensorStateClass.MEASUREMENT),
-)
-
-_TEXT_DESCRIPTIONS = (
-    _StatusDescription("workMode", "Work mode"),
-    _StatusDescription("waterMode", "Water mode"),
-    _StatusDescription("mopState", "Mop state"),
-    _StatusDescription("unitSet", "Unit setting"),
+    _status_description(
+        "cleanCountTotal",
+        translation_key="total_stats_cleanings",
+        state_class=SensorStateClass.TOTAL_INCREASING,
+    ),
+    _status_description(
+        "cleanTimeTotal",
+        translation_key="total_stats_time",
+        unit=UnitOfTime.MINUTES,
+        device_class=SensorDeviceClass.DURATION,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+    ),
+    _status_description("workMode", translation_key="work_mode"),
+    _status_description("waterMode", translation_key="water_mode"),
+    _status_description("mopState", translation_key="mop_state"),
+    _status_description("unitSet", translation_key="unit_set"),
+    _consumable_description("sideBrush", "lifespan_side_brush"),
+    _consumable_description("rollBrush", "lifespan_roll_brush"),
+    _consumable_description("filter", "lifespan_filter"),
+    _consumable_description("unitCare", "lifespan_unit_care"),
 )
 
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    config_entry,
+    config_entry: NgiotConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    """Set up NEO 2 sensors."""
-    controller: Neo2Controller = config_entry.runtime_data
-    entities: list[SensorEntity] = []
-    for device in controller.devices:
-        entities.append(Neo2BatterySensor(device))
-        entities.extend(
-            Neo2StatusSensor(device, description)
-            for description in _STATUS_DESCRIPTIONS
+    """Add entities for passed config_entry in HA."""
+    async_add_entities(
+        get_supported_entities(
+            config_entry.runtime_data, NgiotSensor, ENTITY_DESCRIPTIONS
         )
-        entities.extend(
-            Neo2StatusSensor(device, description) for description in _TEXT_DESCRIPTIONS
-        )
-        entities.extend(
-            Neo2ConsumableSensor(device, consumable)
-            for consumable in ("sideBrush", "rollBrush", "filter", "unitCare")
-        )
-    async_add_entities(entities)
+    )
 
 
-class _Neo2Entity(SensorEntity):
-    """Shared NEO 2 sensor behavior."""
+class NgiotSensor[EventT: Event](
+    NgiotDescriptionEntity[CapabilityEvent[EventT]],
+    SensorEntity,
+):
+    """Sensor."""
 
-    _attr_has_entity_name = True
-    _attr_should_poll = False
-    _attr_available = True
+    entity_description: NgiotSensorEntityDescription
 
-    def __init__(self, device: Device, key: str) -> None:
-        self._device = device
-        self._subscribed_events: set[type[Event]] = set()
-        self._attr_unique_id = f"{device.device_info['did']}_{key}"
-
-    @property
-    def device_info(self) -> DeviceInfo:
-        """Return the robot device information."""
-        info = self._device.device_info
-        return DeviceInfo(
-            identifiers={(DOMAIN, info["did"])},
-            manufacturer="Ecovacs",
-            model=info.get("deviceName", "DEEBOT NEO 2"),
-            model_id=info.get("class"),
-            name=info.get("nick") or info.get("deviceName") or "DEEBOT NEO 2",
-            serial_number=info.get("name") or info["did"],
-            sw_version=self._device.fw_version,
-        )
-
-    def _subscribe(
-        self,
-        event_type: type[Event],
-        callback: Callable[[Event], Coroutine[Any, Any, None]],
-    ) -> None:
-        self._subscribed_events.add(event_type)
-        self.async_on_remove(self._device.events.subscribe(event_type, callback))
-
-    async def async_update(self) -> None:
-        """Request a status refresh."""
-        for event_type in self._subscribed_events:
-            self._device.events.request_refresh(event_type)
-
-
-class Neo2BatterySensor(_Neo2Entity):
-    """Battery level sensor."""
-
-    _attr_name = "Battery"
-    _attr_device_class = SensorDeviceClass.BATTERY
-    _attr_native_unit_of_measurement = PERCENTAGE
-    _attr_state_class = SensorStateClass.MEASUREMENT
-
-    def __init__(self, device: Device) -> None:
-        """Initialize the battery sensor."""
-        super().__init__(device, "battery")
-
+    @override
     async def async_added_to_hass(self) -> None:
-        """Subscribe to battery updates."""
+        """Set up the event listeners now that hass is ready."""
         await super().async_added_to_hass()
 
-        async def on_battery(event: BatteryEvent) -> None:
-            if event.value is not None:
-                self._attr_native_value = int(event.value)
-                self.async_write_ha_state()
+        async def on_event(event: EventT) -> None:
+            if (value := self.entity_description.value_fn(event)) is None:
+                return
+            self._attr_native_value = value
+            if self.entity_description.attributes_fn:
+                self._attr_extra_state_attributes = (
+                    self.entity_description.attributes_fn(event)
+                )
+            self.async_write_ha_state()
 
-        self._subscribe(BatteryEvent, on_battery)
-        self.async_schedule_update_ha_state(force_refresh=True)
-
-
-class Neo2StatusSensor(_Neo2Entity):
-    """Sensor backed by an enriched 10001 status field."""
-
-    def __init__(self, device: Device, description: _StatusDescription) -> None:
-        """Initialize a status sensor."""
-        super().__init__(device, description.key)
-        self._key = description.key
-        self._attr_name = description.name
-        self._attr_native_unit_of_measurement = description.unit
-        self._attr_device_class = description.device_class
-        self._attr_state_class = description.state_class
-
-    async def async_added_to_hass(self) -> None:
-        """Subscribe to enriched status updates."""
-        await super().async_added_to_hass()
-
-        async def on_status(event: Neo2StatusEvent) -> None:
-            if (value := event.data.get(self._key)) is not None:
-                self._attr_native_value = value
-                self.async_write_ha_state()
-
-        self._subscribe(Neo2StatusEvent, on_status)
-        self.async_schedule_update_ha_state(force_refresh=True)
-
-
-class Neo2ConsumableSensor(_Neo2Entity):
-    """Consumable remaining-life sensor."""
-
-    _attr_state_class = SensorStateClass.MEASUREMENT
-
-    def __init__(self, device: Device, consumable: str) -> None:
-        """Initialize a consumable sensor."""
-        super().__init__(device, f"consumable_{consumable}")
-        self._consumable = consumable
-        self._attr_name = consumable
-
-    async def async_added_to_hass(self) -> None:
-        """Subscribe to consumable updates."""
-        await super().async_added_to_hass()
-
-        async def on_status(event: Neo2StatusEvent) -> None:
-            for item in event.data.get("consumables", []):
-                if (
-                    item.get("type") == self._consumable
-                    and item.get("left") is not None
-                ):
-                    self._attr_native_value = item["left"]
-                    self._attr_extra_state_attributes = {"total": item.get("total")}
-                    self.async_write_ha_state()
-
-        self._subscribe(Neo2StatusEvent, on_status)
-        self.async_schedule_update_ha_state(force_refresh=True)
+        self._subscribe(self._capability.event, on_event)

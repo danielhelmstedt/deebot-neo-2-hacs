@@ -1,4 +1,4 @@
-"""Config flow for the DEEBOT NEO 2 integration."""
+"""Config flow."""
 
 from collections.abc import Mapping
 import logging
@@ -8,17 +8,16 @@ from aiohttp import ClientError
 from deebot_client.api_client import ApiClient
 from deebot_client.authentication import Authenticator, create_rest_config
 from deebot_client.exceptions import (
+    DeebotError,
     DeviceVerificationRequiredError,
+    InvalidAuthenticationError,
     InvalidVerificationCodeError,
+    MqttError,
 )
+from deebot_client.mqtt_client import MqttClient, create_mqtt_config
 from deebot_client.util import md5
 import probatio
 
-from homeassistant.components.ecovacs.config_flow import (
-    _validate_input as _ecovacs_validate_input,
-)
-from homeassistant.components.ecovacs.const import CONF_VERIFICATION_CODE
-from homeassistant.components.ecovacs.util import get_client_device_id
 from homeassistant.config_entries import SOURCE_REAUTH, ConfigFlow, ConfigFlowResult
 from homeassistant.const import (
     CONF_COUNTRY,
@@ -26,85 +25,88 @@ from homeassistant.const import (
     CONF_PASSWORD,
     CONF_USERNAME,
 )
-from homeassistant.core import callback
-from homeassistant.exceptions import ConfigEntryError, ConfigEntryNotReady
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import aiohttp_client, selector
 
-from . import _patch_deebot_client
-from .const import (
-    CONF_DEVICE_DID,
-    CONF_DEVICE_NAME,
-    CONF_DEVICE_RESOURCE,
-    DOMAIN,
-    SUPPORTED_DEVICE_CLASSES,
-)
+from .const import CONF_DEVICE_DID, CONF_VERIFICATION_CODE, DOMAIN
+from .controller import is_ngiot_candidate
+from .util import get_client_device_id
 
 _LOGGER = logging.getLogger(__name__)
 
-NEO_2_LOGIC_ID = "y30plus_ww_h_y30h5"
 
-
-def _device_label(info: dict[str, Any]) -> str:
+def _device_label(info: Mapping[str, Any]) -> str:
     return str(
         info.get("nick") or info.get("deviceName") or info.get("name") or info["did"]
     )
 
 
-def _device_api_info(device: Any) -> dict[str, Any]:
-    return device.api if hasattr(device, "api") else device
-
-
-def _is_supported_neo_2(info: dict[str, Any]) -> bool:
-    device_name = str(info.get("deviceName") or "")
-    return (
-        info.get("class") in SUPPORTED_DEVICE_CLASSES
-        or "NEO 2.0" in device_name
-        or info.get("UILogicId") == NEO_2_LOGIC_ID
-    )
-
-
-async def _find_supported_devices(
-    api_client: ApiClient,
-) -> tuple[list[dict[str, Any]], dict[str, str]]:
-    """Return q287s6 devices after official auth validation succeeds."""
+async def _validate_input(
+    hass: HomeAssistant,
+    user_input: Mapping[str, Any],
+    device_id: str,
+    authenticator: Authenticator,
+) -> dict[str, str]:
+    """Validate the login and the MQTT connection."""
     errors: dict[str, str] = {}
+
     try:
-        _patch_deebot_client()
-        devices = await api_client.get_devices()
-    except ConfigEntryNotReady:
-        _LOGGER.debug(
-            "Cannot connect to Ecovacs during device discovery", exc_info=True
-        )
-        errors["base"] = "cannot_connect"
-        return [], errors
-    except ConfigEntryError:
-        _LOGGER.debug(
-            "Invalid Ecovacs authentication details during discovery", exc_info=True
-        )
-        errors["base"] = "invalid_auth"
-        return [], errors
+        await authenticator.authenticate()
+    except DeviceVerificationRequiredError:
+        raise
+    except ClientError:
+        _LOGGER.debug("Cannot connect", exc_info=True)
+        return {"base": "cannot_connect"}
+    except InvalidAuthenticationError:
+        return {"base": "invalid_auth"}
     except Exception:
-        _LOGGER.exception("Unexpected exception during DEEBOT NEO 2 setup")
-        errors["base"] = "unknown"
-        return [], errors
-    discovered = [
-        _device_api_info(device) for device in devices.mqtt
-    ] + devices.not_supported
-    for info in discovered:
-        _LOGGER.debug(
-            "Ecovacs discovery saw device class=%s deviceName=%s",
-            info.get("class"),
-            info.get("deviceName"),
+        _LOGGER.exception("Unexpected exception during login")
+        return {"base": "unknown"}
+
+    mqtt_config = await hass.async_add_executor_job(
+        lambda: create_mqtt_config(
+            device_id=device_id, country=user_input[CONF_COUNTRY]
         )
+    )
+    try:
+        await MqttClient(mqtt_config, authenticator).verify_config()
+    except MqttError:
+        _LOGGER.debug("Cannot connect", exc_info=True)
+        errors["base"] = "cannot_connect"
+    except InvalidAuthenticationError:
+        errors["base"] = "invalid_auth"
+    except Exception:
+        _LOGGER.exception("Unexpected exception during mqtt connection verification")
+        errors["base"] = "unknown"
 
-    supported = [info for info in discovered if _is_supported_neo_2(info)]
-    if not supported:
-        errors["base"] = "no_supported_vacuums"
-    return supported, errors
+    return errors
 
 
-class DeebotNeo2ConfigFlow(ConfigFlow, domain=DOMAIN):
-    """Handle a config flow for DEEBOT NEO 2."""
+async def _find_devices(
+    authenticator: Authenticator,
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    """Return the account's next-gen devices not handled by the Ecovacs core integration."""
+    try:
+        devices = await ApiClient(authenticator).get_devices()
+    except InvalidAuthenticationError:
+        return [], {"base": "invalid_auth"}
+    except DeebotError:
+        _LOGGER.debug("Cannot get devices", exc_info=True)
+        return [], {"base": "cannot_connect"}
+    except Exception:
+        _LOGGER.exception("Unexpected exception during device discovery")
+        return [], {"base": "unknown"}
+
+    found = [
+        dict(info)
+        for info in (*(d.api for d in devices.mqtt), *devices.not_supported)
+        if is_ngiot_candidate(info)
+    ]
+    return found, {} if found else {"base": "no_supported_vacuums"}
+
+
+class NgiotConfigFlow(ConfigFlow, domain=DOMAIN):
+    """Handle a config flow."""
 
     VERSION = 1
 
@@ -115,13 +117,10 @@ class DeebotNeo2ConfigFlow(ConfigFlow, domain=DOMAIN):
         self._authenticator: Authenticator | None = None
         self._device_id = ""
 
-    async def _async_set_authenticator(
-        self, user_input: dict[str, Any]
-    ) -> Authenticator:
+    async def _async_set_authenticator(self, user_input: Mapping[str, Any]) -> None:
         await self._async_teardown_authenticator()
-        self._auth_input = dict(user_input)
-        self._device_id = get_client_device_id(self.hass, False, user_input)
-        self._auth_input[CONF_DEVICE_ID] = self._device_id
+        self._device_id = get_client_device_id(user_input)
+        self._auth_input = {**user_input, CONF_DEVICE_ID: self._device_id}
         self._authenticator = Authenticator(
             create_rest_config(
                 aiohttp_client.async_get_clientsession(self.hass),
@@ -131,7 +130,6 @@ class DeebotNeo2ConfigFlow(ConfigFlow, domain=DOMAIN):
             user_input[CONF_USERNAME],
             md5(user_input[CONF_PASSWORD]),
         )
-        return self._authenticator
 
     async def _async_teardown_authenticator(self) -> None:
         if self._authenticator is not None:
@@ -145,22 +143,18 @@ class DeebotNeo2ConfigFlow(ConfigFlow, domain=DOMAIN):
         if self._authenticator is not None:
             self.hass.async_create_background_task(
                 self._async_teardown_authenticator(),
-                name="deebot_neo_2_config_flow_authenticator_teardown",
+                name=f"{DOMAIN}_config_flow_authenticator_teardown",
             )
 
     async def _async_validate_and_find_devices(
         self,
     ) -> tuple[list[dict[str, Any]], dict[str, str]]:
+        assert self._authenticator is not None
         try:
-            errors = await _ecovacs_validate_input(
-                self.hass,
-                self._auth_input,
-                self._device_id,
-                self._authenticator,
+            errors = await _validate_input(
+                self.hass, self._auth_input, self._device_id, self._authenticator
             )
         except DeviceVerificationRequiredError:
-            if self._authenticator is None:
-                return [], {"base": "unknown"}
             try:
                 await self._authenticator.request_device_verification_code()
             except ClientError:
@@ -171,27 +165,21 @@ class DeebotNeo2ConfigFlow(ConfigFlow, domain=DOMAIN):
             return [], {"base": "device_verification_required"}
         if errors:
             return [], errors
-        if self._authenticator is None:
-            return [], {"base": "unknown"}
-        return await _find_supported_devices(ApiClient(self._authenticator))
+        return await _find_devices(self._authenticator)
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Handle Ecovacs account details."""
+        """Handle the account details."""
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            self._devices = []
             await self._async_set_authenticator(user_input)
             devices, errors = await self._async_validate_and_find_devices()
             if errors.get("base") == "device_verification_required":
                 return await self.async_step_device_verification()
             if not errors:
-                self._devices = devices
-                if len(devices) == 1:
-                    return await self._create_entry(devices[0])
-                return await self.async_step_select_device()
+                return await self._async_select_or_create(devices)
 
         defaults = dict(user_input or {CONF_COUNTRY: self.hass.config.country})
         if errors:
@@ -213,6 +201,14 @@ class DeebotNeo2ConfigFlow(ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
+    async def _async_select_or_create(
+        self, devices: list[dict[str, Any]]
+    ) -> ConfigFlowResult:
+        self._devices = devices
+        if len(devices) == 1:
+            return await self._create_entry(devices[0])
+        return await self.async_step_select_device()
+
     async def async_step_reauth(
         self, entry_data: Mapping[str, Any]
     ) -> ConfigFlowResult:
@@ -228,16 +224,15 @@ class DeebotNeo2ConfigFlow(ConfigFlow, domain=DOMAIN):
         """Confirm credentials and repeat device verification if required."""
         errors: dict[str, str] = {}
         if user_input is not None:
-            self._auth_input[CONF_PASSWORD] = user_input[CONF_PASSWORD]
-            await self._async_set_authenticator(self._auth_input)
-            devices, errors = await self._async_validate_and_find_devices()
+            await self._async_set_authenticator(
+                {**self._auth_input, CONF_PASSWORD: user_input[CONF_PASSWORD]}
+            )
+            _, errors = await self._async_validate_and_find_devices()
             if errors.get("base") == "device_verification_required":
                 return await self.async_step_device_verification()
             if not errors:
-                self._devices = devices
                 return self.async_update_reload_and_abort(
-                    self._get_reauth_entry(),
-                    data_updates=self._auth_input,
+                    self._get_reauth_entry(), data_updates=self._auth_input
                 )
 
         return self.async_show_form(
@@ -258,7 +253,7 @@ class DeebotNeo2ConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_select_device(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Let the user choose a q287s6 vacuum."""
+        """Let the user choose a vacuum."""
         if user_input is not None:
             selected = next(
                 device
@@ -267,7 +262,6 @@ class DeebotNeo2ConfigFlow(ConfigFlow, domain=DOMAIN):
             )
             return await self._create_entry(selected)
 
-        options = {device["did"]: _device_label(device) for device in self._devices}
         return self.async_show_form(
             step_id="select_device",
             data_schema=probatio.Schema(
@@ -275,8 +269,10 @@ class DeebotNeo2ConfigFlow(ConfigFlow, domain=DOMAIN):
                     probatio.Required(CONF_DEVICE_DID): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=[
-                                selector.SelectOptionDict(value=value, label=label)
-                                for value, label in options.items()
+                                selector.SelectOptionDict(
+                                    value=device["did"], label=_device_label(device)
+                                )
+                                for device in self._devices
                             ],
                             mode=selector.SelectSelectorMode.DROPDOWN,
                         )
@@ -300,20 +296,16 @@ class DeebotNeo2ConfigFlow(ConfigFlow, domain=DOMAIN):
             except ClientError:
                 errors["base"] = "cannot_connect"
             except Exception:
-                _LOGGER.exception("Unexpected exception verifying Ecovacs device")
+                _LOGGER.exception("Unexpected exception verifying device")
                 errors["base"] = "unknown"
             else:
                 devices, errors = await self._async_validate_and_find_devices()
                 if not errors:
-                    self._devices = devices
                     if self.source == SOURCE_REAUTH:
                         return self.async_update_reload_and_abort(
-                            self._get_reauth_entry(),
-                            data_updates=self._auth_input,
+                            self._get_reauth_entry(), data_updates=self._auth_input
                         )
-                    if len(devices) == 1:
-                        return await self._create_entry(devices[0])
-                    return await self.async_step_select_device()
+                    return await self._async_select_or_create(devices)
 
         return self.async_show_form(
             step_id="device_verification",
@@ -338,8 +330,7 @@ class DeebotNeo2ConfigFlow(ConfigFlow, domain=DOMAIN):
     async def _create_entry(self, device: dict[str, Any]) -> ConfigFlowResult:
         await self.async_set_unique_id(device["did"])
         self._abort_if_unique_id_configured()
-        data = dict(self._auth_input)
-        data[CONF_DEVICE_DID] = device["did"]
-        data[CONF_DEVICE_RESOURCE] = device.get("resource")
-        data[CONF_DEVICE_NAME] = _device_label(device)
-        return self.async_create_entry(title=_device_label(device), data=data)
+        return self.async_create_entry(
+            title=_device_label(device),
+            data={**self._auth_input, CONF_DEVICE_DID: device["did"]},
+        )

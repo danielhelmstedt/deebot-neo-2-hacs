@@ -1,13 +1,13 @@
 {
   "domain": "deebot_neo_2",
-  "name": "DEEBOT NEO 2",
+  "name": "Ecovacs NGIOT",
   "after_dependencies": ["mqtt"],
-  "codeowners": ["@tysonjtv"],
+  "codeowners": ["@danielhelmstedt"],
   "config_flow": true,
   "dependencies": [],
-  "documentation": "https://github.com/tysonjtv/deebot-neo-2-hacs",
+  "documentation": "https://github.com/danielhelmstedt/deebot-neo-2-hacs",
   "iot_class": "cloud_push",
-  "issue_tracker": "https://github.com/tysonjtv/deebot-neo-2-hacs/issues",
-  "requirements": ["deebot-client>=18.2.0"],
+  "issue_tracker": "https://github.com/danielhelmstedt/deebot-neo-2-hacs/issues",
+  "requirements": ["deebot-client>=18.7.0"],
   "version": "0.1.3"
 }

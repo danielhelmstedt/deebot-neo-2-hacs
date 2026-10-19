@@ -20,7 +20,7 @@ Use this checklist when publishing a new GitHub release.
    git push origin main --tags
    ```
 
-8. Create a GitHub release from the tag: <https://github.com/tysonjtv/deebot-neo-2-hacs/releases/new>
+8. Create a GitHub release from the tag: <https://github.com/danielhelmstedt/deebot-neo-2-hacs/releases/new>
 9. Include release notes with:
 
    - Added/changed features

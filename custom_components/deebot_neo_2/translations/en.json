@@ -1,49 +1,157 @@
 {
   "config": {
+    "abort": {
+      "already_configured": "Device is already configured",
+      "reauth_successful": "Re-authentication was successful"
+    },
+    "error": {
+      "cannot_connect": "Failed to connect",
+      "invalid_auth": "Invalid authentication",
+      "invalid_verification_code": "The verification code is invalid or has expired.",
+      "no_supported_vacuums": "No vacuums using the NGIOT endpoint were found on this account.",
+      "unknown": "Unexpected error"
+    },
     "step": {
-      "user": {
-        "title": "DEEBOT NEO 2",
-        "description": "Log in with the same Ecovacs email you use in the Ecovacs Home app. This integration only supports DEEBOT NEO 2.0 / NEO 2.0 PLUS devices with class q287s6.",
-        "data": {
-          "username": "Ecovacs Email",
-          "password": "Password",
-          "country": "Country"
-        },
-        "data_description": {
-          "username": "Enter the same email address you use in the Ecovacs Home app."
-        }
-      },
-      "select_device": {
-        "title": "Select vacuum",
-        "description": "Choose the DEEBOT NEO 2 vacuum to add.",
-        "data": {
-          "device_did": "Vacuum"
-        }
-      },
       "device_verification": {
-        "title": "Verify your Ecovacs account",
-        "description": "Enter the verification code Ecovacs sent to {username}.",
         "data": {
           "verification_code": "Verification code"
-        }
+        },
+        "description": "A verification code was sent to the email address of {username}. Enter it to authorize this Home Assistant instance."
       },
       "reauth_confirm": {
-        "title": "Reauthenticate Ecovacs",
-        "description": "Confirm the password for {username} to restore the trusted device connection.",
         "data": {
           "password": "Password"
+        },
+        "description": "Enter the new password for {username}."
+      },
+      "select_device": {
+        "data": {
+          "device_did": "Vacuum"
+        },
+        "description": "Select the vacuum to add."
+      },
+      "user": {
+        "data": {
+          "country": "Country",
+          "password": "Password",
+          "username": "Username"
+        },
+        "description": "Sign in with your Ecovacs account to add vacuums that use the NGIOT endpoint, which the core Ecovacs integration does not support."
+      }
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "dormant": {
+        "name": "Dormant"
+      },
+      "relocation_mode": {
+        "name": "Relocation Mode"
+      }
+    },
+    "button": {
+      "reset_filter": {
+        "name": "Reset Filter Count"
+      },
+      "reset_roll_brush": {
+        "name": "Reset Main Brush Count"
+      },
+      "reset_side_brush": {
+        "name": "Reset Side Brush Count"
+      },
+      "reset_unit_care": {
+        "name": "Reset Robot Maintenance Count"
+      }
+    },
+    "image": {
+      "map": {
+        "name": "Map",
+        "state_attributes": {
+          "robot_position": {
+            "name": "Robot Position"
+          }
         }
       }
     },
-    "error": {
-      "cannot_connect": "Cannot connect to Ecovacs. Check your network, account region, and try again.",
-      "invalid_auth": "Invalid Ecovacs account details.",
-      "no_supported_vacuums": "No supported DEEBOT NEO 2.0 / NEO 2.0 PLUS q287s6 vacuum was found on this account.",
-      "invalid_verification_code": "The verification code is invalid or has expired.",
-      "unknown": "Unexpected error. Check Home Assistant logs for details."
+    "number": {
+      "volume": {
+        "name": "Volume"
+      }
     },
-    "abort": {
-      "already_configured": "This vacuum is already configured."
+    "sensor": {
+      "lifespan_filter": {
+        "name": "Filter"
+      },
+      "lifespan_roll_brush": {
+        "name": "Main Brush"
+      },
+      "lifespan_side_brush": {
+        "name": "Side Brush"
+      },
+      "lifespan_unit_care": {
+        "name": "Unit Care"
+      },
+      "mop_state": {
+        "name": "Mop State"
+      },
+      "stats_area": {
+        "name": "Area Cleaned"
+      },
+      "stats_cleanings": {
+        "name": "Cleanings"
+      },
+      "stats_time": {
+        "name": "Cleaning Duration"
+      },
+      "total_stats_area": {
+        "name": "Total Area Cleaned"
+      },
+      "total_stats_cleanings": {
+        "name": "Total Cleanings"
+      },
+      "total_stats_time": {
+        "name": "Total Cleaning Duration"
+      },
+      "unit_set": {
+        "name": "Unit Settings"
+      },
+      "water_mode": {
+        "name": "Water Level"
+      },
+      "work_mode": {
+        "name": "Work Mode"
+      }
+    },
+    "switch": {
+      "auto_resume": {
+        "name": "Auto Resume"
+      },
+      "carpet_boost": {
+        "name": "Suction-Boost on Carpet"
+      },
+      "child_lock": {
+        "name": "Child Lock"
+      },
+      "do_not_disturb": {
+        "name": "Do Not Disturb"
+      }
+    },
+    "vacuum": {
+      "vacuum": {
+        "state_attributes": {
+          "fan_speed": {
+            "state": {
+              "max": "Max",
+              "max_plus": "Max+",
+              "normal": "Normal",
+              "quiet": "Quiet"
+            }
+          },
+          "rooms": {
+            "name": "Rooms"
+          }
+        }
+      }
     }
   }
 }
